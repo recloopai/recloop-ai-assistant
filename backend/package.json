@@ -1,15 +1,32 @@
 {
-  "name": "backend",
+  "name": "recloop-backend",
   "version": "1.0.0",
+  "description": "ReCloop AI Backend with Convex",
   "main": "index.js",
+  "type": "module",
   "scripts": {
+    "dev": "convex dev",
+    "build": "convex deploy",
+    "start": "convex deploy --prod",
+    "predev": "convex dev --until-success",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
   "dependencies": {
-    "convex": "^1.25.4"
-  }
+    "convex": "^1.14.0",
+    "googleapis": "^129.0.0",
+    "openai": "^4.28.0",
+    "node-cron": "^3.0.3",
+    "uuid": "^9.0.1",
+    "jsonwebtoken": "^9.0.2",
+    "resend": "^3.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.19",
+    "@types/uuid": "^9.0.8",
+    "@types/jsonwebtoken": "^9.0.5",
+    "typescript": "^5.3.3"
+  },
+  "keywords": ["convex", "ai", "scheduling", "gmail", "calendar"],
+  "author": "Your Name",
+  "license": "MIT"
 }

@@ -1,0 +1,9 @@
+{
+  "functions": "./convex/",
+  "authInfo": [
+    {
+      "domain": "https://recloop.com",
+      "applicationID": "convex"
+    }
+  ]
+}
