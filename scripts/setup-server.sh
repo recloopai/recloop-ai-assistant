@@ -1,117 +1,282 @@
 #!/bin/bash
 
-# ReCloop AI Server Setup Script
-# Run this script on your Ubuntu server to set up the production environment
+# 🚀 ReCloop AI Production Server Setup Script
+# Run this script on your Ubuntu server to set up the complete production environment
+# Usage: chmod +x scripts/setup-server.sh && ./scripts/setup-server.sh
 
-set -e
+set -euo pipefail
 
-echo "🚀 Setting up ReCloop AI production server..."
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
 
-# Update system
-echo "📦 Updating system packages..."
+# Logging function
+log() {
+    echo -e "${GREEN}[$(date +'%Y-%m-%d %H:%M:%S')] $1${NC}"
+}
+
+error() {
+    echo -e "${RED}[ERROR] $1${NC}" >&2
+    exit 1
+}
+
+warn() {
+    echo -e "${YELLOW}[WARNING] $1${NC}"
+}
+
+info() {
+    echo -e "${BLUE}[INFO] $1${NC}"
+}
+
+# Check if running as root
+if [ "$EUID" -eq 0 ]; then
+    error "Please run this script as a regular user with sudo privileges, not as root"
+fi
+
+# Check if running on Ubuntu
+if ! grep -q "Ubuntu" /etc/os-release; then
+    error "This script is designed for Ubuntu. Detected: $(cat /etc/os-release | grep PRETTY_NAME)"
+fi
+
+log "🚀 Starting ReCloop AI production server setup..."
+
+# ===========================================
+# 📦 SYSTEM UPDATES AND PACKAGES
+# ===========================================
+log "📦 Updating system packages..."
 sudo apt update && sudo apt upgrade -y
 
-# Install required packages
-echo "📦 Installing required packages..."
+log "📦 Installing essential packages..."
 sudo apt install -y \
     nginx \
     certbot \
     python3-certbot-nginx \
-    nodejs \
-    npm \
-    git \
     curl \
+    wget \
+    git \
     htop \
+    iotop \
+    nload \
     ufw \
     fail2ban \
-    logrotate
+    logrotate \
+    unzip \
+    zip \
+    software-properties-common \
+    apt-transport-https \
+    ca-certificates \
+    gnupg \
+    lsb-release \
+    build-essential
+
+# ===========================================
+# 🟢 NODE.JS AND NPM INSTALLATION
+# ===========================================
+log "🟢 Installing Node.js and NPM..."
+
+# Install Node.js 20.x LTS
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt install -y nodejs
+
+# Verify installation
+node_version=$(node --version)
+npm_version=$(npm --version)
+log "Node.js version: $node_version"
+log "NPM version: $npm_version"
 
 # Install PM2 globally
-echo "📦 Installing PM2..."
+log "📦 Installing PM2 process manager..."
 sudo npm install -g pm2
 
-# Create application directories
-echo "📁 Creating application directories..."
+# ===========================================
+# 📁 DIRECTORY STRUCTURE
+# ===========================================
+log "📁 Creating application directories..."
+sudo mkdir -p /var/www/recloop
 sudo mkdir -p /var/www/recloop-frontend
 sudo mkdir -p /var/www/recloop-backend
-sudo mkdir -p /var/www/recloop
+sudo mkdir -p /var/log/recloop
 sudo mkdir -p /var/log/pm2
 sudo mkdir -p /var/backups/recloop
+sudo mkdir -p /var/git
+sudo mkdir -p /home/$USER/.ssh
 
-# Set proper permissions
-echo "🔐 Setting permissions..."
+# Create git repository for deployments
+log "📁 Setting up Git deployment repository..."
+sudo mkdir -p /var/git/recloop.git
+cd /var/git/recloop.git
+sudo git init --bare
+sudo chown -R $USER:$USER /var/git
+
+# ===========================================
+# 🔐 PERMISSIONS AND OWNERSHIP
+# ===========================================
+log "🔐 Setting proper permissions..."
 sudo chown -R $USER:$USER /var/www/recloop*
+sudo chown -R $USER:$USER /var/log/recloop
 sudo chown -R $USER:$USER /var/log/pm2
 sudo chown -R $USER:$USER /var/backups/recloop
+sudo chown -R www-data:www-data /var/www
+sudo chmod -R 755 /var/www
 
-# Configure firewall
-echo "🔥 Configuring firewall..."
+# ===========================================
+# 🔥 FIREWALL CONFIGURATION
+# ===========================================
+log "🔥 Configuring UFW firewall..."
+sudo ufw --force reset
 sudo ufw default deny incoming
 sudo ufw default allow outgoing
 sudo ufw allow ssh
 sudo ufw allow 'Nginx Full'
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw allow 22/tcp
 sudo ufw --force enable
 
-# Configure fail2ban
-echo "🛡️ Configuring fail2ban..."
+# ===========================================
+# 🛡️ FAIL2BAN CONFIGURATION
+# ===========================================
+log "🛡️ Configuring Fail2Ban..."
 sudo cp /etc/fail2ban/jail.conf /etc/fail2ban/jail.local
 
-cat > /tmp/nginx-noscript.conf << 'EOF'
-[nginx-noscript]
+# Create custom Fail2Ban configuration for Nginx
+sudo tee /etc/fail2ban/jail.d/nginx-recloop.conf > /dev/null <<EOF
+[nginx-http-auth]
 enabled = true
+filter = nginx-http-auth
 port = http,https
-filter = nginx-noscript
-logpath = /var/log/nginx/access.log
-maxretry = 6
+logpath = /var/log/nginx/error.log
+maxretry = 3
+bantime = 600
+findtime = 600
 
-[nginx-badbots]
+[nginx-limit-req]
 enabled = true
+filter = nginx-limit-req
 port = http,https
-filter = nginx-badbots
-logpath = /var/log/nginx/access.log
-maxretry = 2
-
-[nginx-noproxy]
-enabled = true
-port = http,https
-filter = nginx-noproxy
-logpath = /var/log/nginx/access.log
-maxretry = 2
+logpath = /var/log/nginx/error.log
+maxretry = 5
+bantime = 600
+findtime = 600
 EOF
 
-sudo cp /tmp/nginx-noscript.conf /etc/fail2ban/jail.d/
+sudo systemctl enable fail2ban
 sudo systemctl restart fail2ban
 
-# Configure Git for deployment
-echo "📋 Setting up Git deployment..."
-sudo mkdir -p /var/git/recloop.git
-sudo chown -R $USER:$USER /var/git
-cd /var/git/recloop.git
-git init --bare
+# ===========================================
+# 🌐 NGINX CONFIGURATION
+# ===========================================
+log "🌐 Configuring Nginx..."
 
-# Create post-receive hook
-cat > hooks/post-receive << 'EOF'
-#!/bin/bash
-cd /var/www/recloop
-git --git-dir=/var/git/recloop.git --work-tree=/var/www/recloop checkout -f
-./scripts/deploy.sh
+# Remove default site
+sudo rm -f /etc/nginx/sites-enabled/default
+
+# Create Nginx configuration for ReCloop
+sudo tee /etc/nginx/sites-available/recloop > /dev/null <<'EOF'
+# ReCloop AI Nginx Configuration
+server {
+    listen 80;
+    server_name recloop.com www.recloop.com;
+    
+    # Security headers
+    add_header X-Frame-Options DENY;
+    add_header X-Content-Type-Options nosniff;
+    add_header X-XSS-Protection "1; mode=block";
+    add_header Referrer-Policy "strict-origin-when-cross-origin";
+    
+    # Rate limiting
+    limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
+    limit_req_zone $binary_remote_addr zone=webhook:10m rate=5r/s;
+    
+    # Frontend - Serve static files
+    location / {
+        root /var/www/recloop-frontend/dist;
+        try_files $uri $uri/ /index.html;
+        
+        # Cache static assets
+        location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+            expires 1y;
+            add_header Cache-Control "public, immutable";
+        }
+    }
+    
+    # API endpoints - Proxy to backend
+    location /api/ {
+        limit_req zone=api burst=20 nodelay;
+        proxy_pass http://localhost:3001/api/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+    }
+    
+    # Webhook endpoints
+    location /webhook/ {
+        limit_req zone=webhook burst=10 nodelay;
+        proxy_pass http://localhost:3001/webhook/;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_connect_timeout 30s;
+        proxy_send_timeout 30s;
+        proxy_read_timeout 30s;
+    }
+    
+    # Health check endpoint
+    location /health {
+        access_log off;
+        return 200 "healthy\n";
+        add_header Content-Type text/plain;
+    }
+    
+    # Security: Block access to sensitive files
+    location ~ /\. {
+        deny all;
+        access_log off;
+        log_not_found off;
+    }
+    
+    location ~ ~$ {
+        deny all;
+        access_log off;
+        log_not_found off;
+    }
+}
 EOF
 
-chmod +x hooks/post-receive
+# Enable the site
+sudo ln -sf /etc/nginx/sites-available/recloop /etc/nginx/sites-enabled/
 
-# Configure log rotation
-echo "📊 Setting up log rotation..."
-cat > /tmp/recloop-logrotate << 'EOF'
-/var/log/recloop*.log {
+# Test Nginx configuration
+sudo nginx -t || error "Nginx configuration test failed"
+
+# ===========================================
+# 📊 LOG ROTATION CONFIGURATION
+# ===========================================
+log "📊 Setting up log rotation..."
+
+sudo tee /etc/logrotate.d/recloop > /dev/null <<EOF
+/var/log/recloop/*.log {
     daily
     missingok
-    rotate 30
+    rotate 52
     compress
     delaycompress
     notifempty
-    create 644 root root
+    create 644 $USER $USER
     postrotate
-        systemctl reload nginx > /dev/null 2>&1 || true
         pm2 reloadLogs
     endscript
 }
@@ -119,126 +284,159 @@ cat > /tmp/recloop-logrotate << 'EOF'
 /var/log/pm2/*.log {
     daily
     missingok
-    rotate 14
+    rotate 30
     compress
     delaycompress
     notifempty
-    create 644 root root
+    create 644 $USER $USER
     postrotate
         pm2 reloadLogs
     endscript
 }
 EOF
 
-sudo cp /tmp/recloop-logrotate /etc/logrotate.d/recloop
+# ===========================================
+# ⏰ CRON JOBS FOR MAINTENANCE
+# ===========================================
+log "⏰ Setting up maintenance cron jobs..."
 
-# Set up PM2 startup
-echo "⚙️ Configuring PM2 startup..."
-pm2 startup
-echo "❗ IMPORTANT: Run the command shown above as root to complete PM2 startup configuration"
+# Add cron jobs for automated maintenance
+(crontab -l 2>/dev/null; echo "# ReCloop AI Maintenance Tasks") | crontab -
+(crontab -l 2>/dev/null; echo "0 2 * * * /usr/bin/certbot renew --quiet") | crontab -
+(crontab -l 2>/dev/null; echo "0 3 * * * tar -czf /var/backups/recloop/backup-$(date +%Y%m%d-%H%M%S).tar.gz /var/www/recloop") | crontab -
+(crontab -l 2>/dev/null; echo "0 4 * * * find /var/backups/recloop -name '*.tar.gz' -mtime +30 -delete") | crontab -
+(crontab -l 2>/dev/null; echo "*/5 * * * * curl -fs http://localhost/health > /dev/null || pm2 restart ecosystem.config.js") | crontab -
 
-# Configure Nginx
-echo "🌐 Configuring Nginx..."
-sudo rm -f /etc/nginx/sites-enabled/default
+# ===========================================
+# 🔄 GIT DEPLOYMENT HOOKS
+# ===========================================
+log "🔄 Setting up Git deployment hooks..."
 
-# Copy nginx config (this assumes you've created the nginx config file)
-if [ -f "/var/www/recloop/nginx/recloop.conf" ]; then
-    sudo cp /var/www/recloop/nginx/recloop.conf /etc/nginx/sites-available/
-    sudo ln -sf /etc/nginx/sites-available/recloop.conf /etc/nginx/sites-enabled/
-else
-    echo "⚠️ Nginx config file not found. You'll need to configure it manually."
+# Create post-receive hook for automatic deployment
+tee /var/git/recloop.git/hooks/post-receive > /dev/null <<'EOF'
+#!/bin/bash
+
+# ReCloop AI Git Post-Receive Hook
+# This script runs automatically when code is pushed to the production repository
+
+set -e
+
+APP_DIR="/var/www/recloop"
+FRONTEND_DIR="/var/www/recloop-frontend"
+BACKEND_DIR="/var/www/recloop-backend"
+LOG_FILE="/var/log/recloop/deploy.log"
+USER="recloop"
+
+echo "$(date): Starting deployment..." >> $LOG_FILE
+
+# Checkout the latest code
+cd $APP_DIR
+git --git-dir=/var/git/recloop.git --work-tree=$APP_DIR checkout main -f
+
+# Install dependencies and build
+echo "$(date): Installing dependencies..." >> $LOG_FILE
+npm run install:all >> $LOG_FILE 2>&1
+
+echo "$(date): Building applications..." >> $LOG_FILE
+npm run build >> $LOG_FILE 2>&1
+
+# Copy built frontend to serve directory
+echo "$(date): Deploying frontend..." >> $LOG_FILE
+cp -r $APP_DIR/frontend/dist/* $FRONTEND_DIR/
+
+# Deploy backend
+echo "$(date): Deploying backend..." >> $LOG_FILE
+rsync -av --delete $APP_DIR/backend/ $BACKEND_DIR/
+rsync -av --delete $APP_DIR/webhook-server/ $APP_DIR/
+
+# Restart services
+echo "$(date): Restarting services..." >> $LOG_FILE
+pm2 restart ecosystem.config.js >> $LOG_FILE 2>&1
+
+# Reload Nginx
+nginx -t && systemctl reload nginx >> $LOG_FILE 2>&1
+
+echo "$(date): Deployment completed successfully!" >> $LOG_FILE
+EOF
+
+chmod +x /var/git/recloop.git/hooks/post-receive
+
+# ===========================================
+# 🔧 PM2 STARTUP CONFIGURATION
+# ===========================================
+log "🔧 Configuring PM2 startup..."
+
+# Generate PM2 startup script
+pm2 startup systemd -u $USER --hp /home/$USER
+sudo env PATH=$PATH:/usr/bin pm2 startup systemd -u $USER --hp /home/$USER
+
+# ===========================================
+# 🛠️ SYSTEM OPTIMIZATION
+# ===========================================
+log "🛠️ Optimizing system settings..."
+
+# Increase file descriptor limits
+sudo tee -a /etc/security/limits.conf > /dev/null <<EOF
+$USER soft nofile 65536
+$USER hard nofile 65536
+EOF
+
+# Optimize kernel parameters
+sudo tee -a /etc/sysctl.conf > /dev/null <<EOF
+# ReCloop AI Optimizations
+net.core.somaxconn = 65536
+net.ipv4.tcp_max_syn_backlog = 65536
+net.ipv4.ip_local_port_range = 1024 65536
+vm.swappiness = 10
+EOF
+
+sudo sysctl -p
+
+# ===========================================
+# 🔄 SERVICE STARTUP
+# ===========================================
+log "🔄 Starting and enabling services..."
+
+sudo systemctl enable nginx
+sudo systemctl start nginx
+sudo systemctl enable fail2ban
+sudo systemctl start fail2ban
+
+# ===========================================
+# ✅ FINAL SETUP
+# ===========================================
+log "✅ Finalizing setup..."
+
+# Create a deployment user (optional)
+if ! id "recloop" &>/dev/null; then
+    sudo useradd -m -s /bin/bash recloop
+    sudo usermod -aG sudo recloop
+    sudo mkdir -p /home/recloop/.ssh
+    sudo chown -R recloop:recloop /home/recloop
 fi
 
-# Test nginx configuration
-sudo nginx -t || echo "⚠️ Nginx configuration test failed. Please check the config."
+# Set up SSH key for deployment (if provided)
+if [ -f "/tmp/deploy_key.pub" ]; then
+    sudo cp /tmp/deploy_key.pub /home/recloop/.ssh/authorized_keys
+    sudo chown recloop:recloop /home/recloop/.ssh/authorized_keys
+    sudo chmod 600 /home/recloop/.ssh/authorized_keys
+fi
 
-# Create systemd services for monitoring
-echo "🔧 Creating systemd services..."
-cat > /tmp/recloop-monitor.service << 'EOF'
-[Unit]
-Description=ReCloop AI Monitor Service
-After=network.target
+# Create initial health check files
+echo "healthy" | sudo tee /var/www/recloop-frontend/health.txt > /dev/null
 
-[Service]
-Type=simple
-User=root
-ExecStart=/bin/bash -c 'while true; do pm2 status | grep -q "online" || pm2 restart ecosystem.config.js; sleep 60; done'
-Restart=always
-RestartSec=10
+log "🎉 Server setup completed successfully!"
+info "Next steps:"
+info "1. Configure your domain DNS to point to this server"
+info "2. Copy your .env files and configure environment variables"
+info "3. Set up SSL certificates: sudo certbot --nginx -d recloop.com"
+info "4. Deploy your application: git push production main"
+info "5. Start PM2 processes: pm2 start ecosystem.config.js"
 
-[Install]
-WantedBy=multi-user.target
-EOF
+warn "Important: Remember to:"
+warn "- Configure your environment variables in .env files"
+warn "- Set up Google Cloud APIs and OAuth"
+warn "- Configure Convex deployment"
+warn "- Test all endpoints after deployment"
 
-sudo cp /tmp/recloop-monitor.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable recloop-monitor
-
-# Set up SSL certificates (Let's Encrypt)
-echo "🔒 Setting up SSL certificates..."
-echo "ℹ️ We'll set up a basic cert. You'll need to run certbot after your domain points to this server."
-
-# Create a basic HTML page for initial testing
-cat > /tmp/index.html << 'EOF'
-<!DOCTYPE html>
-<html>
-<head>
-    <title>ReCloop AI - Coming Soon</title>
-    <style>
-        body { font-family: Arial, sans-serif; text-align: center; margin: 50px; }
-        .container { max-width: 600px; margin: 0 auto; }
-        .logo { font-size: 2em; color: #333; margin-bottom: 20px; }
-        .status { background: #e8f5e8; padding: 20px; border-radius: 8px; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="logo">🔄 ReCloop AI</div>
-        <div class="status">
-            <h2>Server Setup Complete!</h2>
-            <p>Your ReCloop AI scheduling assistant is being configured.</p>
-            <p>Server Time: <span id="time"></span></p>
-        </div>
-    </div>
-    <script>
-        document.getElementById('time').textContent = new Date().toLocaleString();
-    </script>
-</body>
-</html>
-EOF
-
-sudo mkdir -p /var/www/html
-sudo cp /tmp/index.html /var/www/html/
-
-# Start services
-echo "🔄 Starting services..."
-sudo systemctl restart nginx
-sudo systemctl enable nginx
-
-# Security hardening
-echo "🔒 Applying security hardening..."
-# Disable root login
-sudo sed -i 's/#PermitRootLogin yes/PermitRootLogin no/' /etc/ssh/sshd_config
-sudo sed -i 's/PermitRootLogin yes/PermitRootLogin no/' /etc/ssh/sshd_config
-
-# Disable password authentication (uncomment if you want to use only key-based auth)
-# sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
-
-sudo systemctl restart ssh
-
-echo "✅ Server setup complete!"
-echo ""
-echo "Next steps:"
-echo "1. Point your domain 'recloop.com' to this server's IP address"
-echo "2. Run: sudo certbot --nginx -d recloop.com -d www.recloop.com"
-echo "3. Clone your repository to /var/www/recloop"
-echo "4. Configure your environment variables in /var/www/recloop/.env"
-echo "5. Run the deployment script: ./scripts/deploy.sh"
-echo ""
-echo "Server Information:"
-echo "- Web root: /var/www/recloop-frontend"
-echo "- Application: /var/www/recloop"
-echo "- Logs: /var/log/pm2/ and /var/log/nginx/"
-echo "- Git repository: /var/git/recloop.git"
-echo ""
-echo "🔄 Git deployment URL: $USER@$(hostname -I | awk '{print $1}'):/var/git/recloop.git"
+log "Server is ready for ReCloop AI deployment! 🚀"
